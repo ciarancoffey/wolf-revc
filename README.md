@@ -94,6 +94,57 @@ ssh $STREAM_USER@$STREAM_HOST 'docker restart wolf'
 
 After pairing, "GTA: Vice City" shows up in Moonlight alongside Wolf UI and the default demo apps.
 
+## Alternative: build in place, fold into an existing Docker stack
+
+If you already run a monolithic `docker-compose.yml` for your homelab, you can skip the `docker save | ssh | docker load` step entirely and build the image directly on the streaming host. Add two services to your existing compose:
+
+```yaml
+services:
+  # ... your existing services ...
+
+  wolf:
+    image: ghcr.io/games-on-whales/wolf:stable
+    container_name: wolf
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /mnt/docker_volumes/wolf:/etc/wolf          # or wherever you keep service config
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+      - /dev/:/dev/:rw
+      - /run/udev:/run/udev:rw
+    device_cgroup_rules:
+      - "c 13:* rmw"
+    devices:
+      - /dev/dri
+      - /dev/uinput
+      - /dev/uhid
+
+  wolf-revc:
+    build: ./wolf-revc
+    image: wolf-revc:local
+    profiles: ["build"]   # never started by `compose up`; only built explicitly
+```
+
+Place the build inputs next to that compose file:
+
+```
+<your-compose-dir>/
+├── docker-compose.yml
+└── wolf-revc/
+    ├── Dockerfile
+    └── startup.sh
+```
+
+Build the image: `docker compose build wolf-revc`. The `profiles: ["build"]` keeps it out of `up`/`start` (Wolf launches a fresh container per stream session via the Docker socket — there's no long-running `wolf-revc` container).
+
+For the asset mount, pick whatever location matches your stack's convention (e.g. `/mnt/docker_volumes/wolf-revc/`), point the Wolf TOML's `mounts` at it (`/mnt/docker_volumes/wolf-revc:/assets:rw`), and copy your GTA:VC Steam install there.
+
+Tradeoffs vs the standalone Quickstart:
+- (+) No `docker save | ssh | docker load`; the streaming host is the only host.
+- (+) Build artifacts live alongside your other Docker images.
+- (−) ~1.5 GB of intermediate build layers stay on the streaming host (run `docker builder prune` to reclaim).
+- (−) If you don't already have a monolithic compose, the standalone path is simpler.
+
 ## How a stream session actually works
 
 1. Moonlight client tells Wolf to launch "GTA: Vice City" over HTTPS (47984).
@@ -123,11 +174,17 @@ On Android (Shield), Moonlight Android also can't claim raw USB devices the way 
 
 ### Rebuild the image after editing the Dockerfile or startup.sh
 
-On the build host:
+**Standalone (build on a separate host, ship to streaming host):**
 ```bash
 docker build -t wolf-revc:local .
 docker save wolf-revc:local | ssh $STREAM_USER@$STREAM_HOST 'docker load'
 ```
+
+**Build in place** (Dockerfile + startup.sh at `<compose-dir>/wolf-revc/` on the streaming host):
+```bash
+ssh $STREAM_USER@$STREAM_HOST 'cd ~/docker && docker compose build wolf-revc'
+```
+The `profiles: ["build"]` directive on the `wolf-revc` service keeps it out of `up`/`start`; `compose build` targets it explicitly.
 
 ### Iterate on startup.sh without rebuilding
 
@@ -135,7 +192,7 @@ Uncomment the optional bind-mount line in `revc-app.toml.snippet` (or in `/etc/w
 
 ### Inspect a failed launch
 
-Spawned per-session app containers are named `WolfReVC_<session-uuid>` and Wolf removes them almost immediately on exit, which makes `docker logs WolfReVC_*` impractical. The included `startup.sh` tees its output to `/assets/wolf-revc-runtime.log` — which is `$HOME/.reVC/wolf-revc-runtime.log` on the streaming host, and survives the container being torn down. That log shows reVC's stderr, GLFW errors, the synced resolution, etc.
+Spawned per-session app containers are named `WolfReVC_<session-uuid>` and Wolf removes them almost immediately on exit, which makes `docker logs WolfReVC_*` impractical. The included `startup.sh` tees its output to `/assets/wolf-revc-runtime.log` inside the container — which is `<your-asset-dir>/wolf-revc-runtime.log` on the streaming host (e.g. `$HOME/.reVC/wolf-revc-runtime.log` for the standalone pattern, or `/mnt/docker_volumes/wolf-revc/wolf-revc-runtime.log` for the in-place pattern). It survives the container being torn down. That log shows reVC's stderr, GLFW errors, the synced resolution, etc.
 
 For Wolf-server-side issues:
 ```bash
@@ -158,16 +215,16 @@ Documented for the next person who runs into them:
 - **reVC.ini's `[VideoMode]` must match the stream resolution.** Handled by the `sed` line in `startup.sh`. If reVC mysteriously dies on launch with no game window, check the runtime log for "Cannot find desired video mode".
 - **4K can max out an integrated GPU.** Render + Sway/gamescope + HEVC encode all compete for the same silicon. If 4K hitches, drop to 1440p in Moonlight's settings — `startup.sh` will follow.
 - **The `gamecontrollerdb.txt` shipped in `/opt/revc/gamefiles/` is whatever the archive.org bundle had (often outdated).** The container `cd`s to `/assets` before running, so reVC reads `$HOME/.reVC/gamecontrollerdb.txt` on the host instead — keep that one updated from the upstream [SDL_GameControllerDB](https://github.com/mdqinc/SDL_GameControllerDB).
-- **Wolf wants UID 1000 on the host to own `$HOME/.reVC`.** Inside the spawned container, the app runs as user `retro` (UID 1000). If your host user isn't UID 1000, either change ownership of `$HOME/.reVC` to UID 1000 or pass `PUID/PGID` env vars in the Wolf TOML.
+- **Wolf wants UID 1000 to own the asset dir on the host.** Inside the spawned container, the app runs as user `retro` (UID 1000). If your host user isn't UID 1000, either `chown -R 1000:1000` the asset dir or pass `PUID/PGID` env vars in the Wolf TOML.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `Dockerfile` | Multi-stage: stage 1 builds `librw` and `reVC` from source; stage 2 lays them on top of `base-app:edge` with the runtime libs. |
-| `startup.sh` | Baked into the image as `/opt/gow/startup-app.sh`. Syncs resolution, tees log, runs reVC under Sway. Can also be bind-mounted for fast iteration. |
-| `docker-compose.wolf.yml` | Wolf server compose file. Deploy to the streaming host (typically as `~/wolf/docker-compose.yml`). |
-| `revc-app.toml.snippet` | The `[[profiles.apps]]` block to append to `/etc/wolf/cfg/config.toml` on the streaming host. Contains `<HOME>` placeholders to replace. |
+| `Dockerfile` | Multi-stage: stage 1 builds `librw` and `reVC` from source; stage 2 lays them on top of `base-app:edge` with the runtime libs. Uses `COPY` + `RUN chmod` (not `COPY --chmod`) so it works on both BuildKit and the legacy builder. |
+| `startup.sh` | Baked into the image as `/opt/gow/startup-app.sh`. Syncs resolution, tees log, runs reVC under Sway. Can also be bind-mounted for fast iteration without a rebuild. |
+| `docker-compose.wolf.yml` | Standalone Wolf server compose file — use this if you don't already run a monolithic compose. Deploy as e.g. `~/wolf/docker-compose.yml` on the streaming host. |
+| `revc-app.toml.snippet` | The `[[profiles.apps]]` block to append to Wolf's `config.toml` on the streaming host. Contains `<HOME>` placeholders to replace with your asset path. |
 | `LEGAL.md` | The legal posture — see this before deciding whether to use the repo. |
 | `LICENSE` | MIT, covering only the files in this repo (not Wolf, not reVC, not GTA:VC). |
 
