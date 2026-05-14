@@ -40,4 +40,5 @@ COPY --from=builder /usr/lib/x86_64-linux-gnu/librw.so* /usr/lib/x86_64-linux-gn
 COPY --from=builder /src/re3/build/src/reVC             /opt/revc/reVC
 COPY --from=builder /src/re3/gamefiles                  /opt/revc/gamefiles
 
-COPY --chmod=755 startup.sh /opt/gow/startup-app.sh
+COPY startup.sh /opt/gow/startup-app.sh
+RUN chmod 755 /opt/gow/startup-app.sh
