@@ -1,0 +1,33 @@
+# Append this block to /etc/wolf/cfg/config.toml on your streaming host
+# (under the "games" [[profiles]] section, or as the last block in the file).
+# Replace <HOME> with the absolute path to the home directory that owns ~/.reVC
+# on the streaming host (typically /home/<your-user>).
+#
+# Then: `docker restart wolf` to pick up the change.
+
+[[profiles.apps]]
+start_virtual_compositor = true
+title = 'GTA: Vice City'
+
+    [profiles.apps.runner]
+    base_create_json = '''{
+  "HostConfig": {
+    "IpcMode": "host",
+    "CapAdd": ["NET_RAW", "MKNOD", "NET_ADMIN", "SYS_ADMIN", "SYS_NICE"],
+    "Privileged": false,
+    "DeviceCgroupRules": ["c 13:* rmw", "c 244:* rmw"]
+  }
+}
+'''
+    devices = []
+    env = [ 'RUN_SWAY=true', 'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/*' ]
+    image = 'wolf-revc:local'
+    mounts = [
+        '<HOME>/.reVC:/assets:rw',
+        # Optional development-iteration mount — uncomment to override the
+        # baked-in startup script without rebuilding the image:
+        # '<HOME>/wolf-revc/startup.sh:/opt/gow/startup-app.sh:ro',
+    ]
+    name = 'WolfReVC'
+    ports = []
+    type = 'docker'

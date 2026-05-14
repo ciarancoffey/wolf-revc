@@ -1,0 +1,12 @@
+# local backups created during in-place edits
+*.bak
+
+# the runtime log our startup.sh writes lives inside the asset volume,
+# but if anyone accidentally drops one here, ignore it
+wolf-revc-runtime.log
+
+# editor / OS noise
+*.swp
+.DS_Store
+.idea/
+.vscode/
